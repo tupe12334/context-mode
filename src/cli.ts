@@ -29,7 +29,7 @@ const args = process.argv.slice(2);
 if (args[0] === "setup") {
   setup();
 } else if (args[0] === "doctor") {
-  doctor().then((code) => process.exit(code));
+  doctor().then((code) => { process.exitCode = code; });
 } else if (args[0] === "upgrade") {
   upgrade();
 } else {
