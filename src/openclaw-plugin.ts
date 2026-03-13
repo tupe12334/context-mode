@@ -145,35 +145,21 @@ export default {
   name: "Context Mode",
   configSchema,
 
-  async register(api: OpenClawPluginApi): Promise<void> {
+  // OpenClaw calls register() synchronously — returning a Promise causes hooks
+  // to be silently ignored. Async init runs eagerly; hooks await it on first use.
+  register(api: OpenClawPluginApi): void {
     // Resolve build dir from compiled JS location
     const buildDir = dirname(fileURLToPath(import.meta.url));
     const projectDir = process.env.OPENCLAW_PROJECT_DIR || process.cwd();
+    const pluginRoot = resolve(buildDir, "..");
 
-    // Load routing module (ESM .mjs, lives outside build/ in hooks/)
-    const routingPath = resolve(buildDir, "..", "hooks", "core", "routing.mjs");
-    const routing = await import(pathToFileURL(routingPath).href);
-    await routing.initSecurity(buildDir);
-
-    // Initialize session
+    // Initialize session synchronously (SessionDB constructor is sync)
     const db = new SessionDB({ dbPath: getDBPath(projectDir) });
     const sessionId = randomUUID();
     db.ensureSession(sessionId, projectDir);
-
-    // Auto-write AGENTS.md on startup for OpenClaw projects
-    try {
-      new OpenClawAdapter().writeRoutingInstructions(
-        projectDir,
-        resolve(buildDir, ".."),
-      );
-    } catch {
-      // best effort — never break plugin init
-    }
-
-    // Clean up old sessions on startup (0 = immediate cleanup, no retention)
     db.cleanupOldSessions(0);
 
-    // Load routing instructions for prompt injection
+    // Load routing instructions synchronously for prompt injection
     let routingInstructions = "";
     try {
       const instructionsPath = resolve(
@@ -190,11 +176,27 @@ export default {
       // best effort
     }
 
+    // Async init: load routing module + write AGENTS.md. Hooks await this.
+    const initPromise = (async () => {
+      const routingPath = resolve(buildDir, "..", "hooks", "core", "routing.mjs");
+      const routing = await import(pathToFileURL(routingPath).href);
+      await routing.initSecurity(buildDir);
+
+      try {
+        new OpenClawAdapter().writeRoutingInstructions(projectDir, pluginRoot);
+      } catch {
+        // best effort — never break plugin init
+      }
+
+      return { routing };
+    })();
+
     // ── 1. tool_call:before — Routing enforcement ──────────
 
     api.registerHook(
       "tool_call:before",
       async (event: unknown) => {
+        const { routing } = await initPromise;
         const e = event as ToolCallEvent;
         const toolName = e.toolName ?? "";
         const toolInput = e.params ?? {};
@@ -329,8 +331,6 @@ export default {
     // ── 6. Auto-reply commands — ctx slash commands ───────
 
     if (api.registerCommand) {
-      const pluginRoot = resolve(buildDir, "..");
-
       api.registerCommand({
         name: "ctx-stats",
         description: "Show context-mode session statistics",
