@@ -1,12 +1,20 @@
 /**
- * Tests for cli.bundle.mjs — ensures CLI works for marketplace installs
- * where build/ directory doesn't exist.
+ * Consolidated CLI tests
+ *
+ * Combines:
+ *   - cli-bundle.test.ts (marketplace install support)
+ *   - cli-hook-path.test.ts (forward-slash hook paths)
+ *   - package-exports.test.ts (public API surface)
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, test, expect } from "vitest";
+import { strict as assert } from "node:assert";
 import { readFileSync, existsSync, accessSync, constants } from "node:fs";
 import { resolve } from "node:path";
+import { toUnixPath } from "../../src/cli.js";
 
-const ROOT = resolve(import.meta.dirname, "..");
+const ROOT = resolve(import.meta.dirname, "../..");
+
+// ── cli.bundle.mjs — marketplace install support ──────────────────────
 
 describe("cli.bundle.mjs — marketplace install support", () => {
   // ── Package configuration ─────────────────────────────────
@@ -94,5 +102,71 @@ describe("cli.bundle.mjs — marketplace install support", () => {
     const gitignore = readFileSync(resolve(ROOT, ".gitignore"), "utf-8");
     expect(gitignore).toContain("server.bundle.mjs");
     expect(gitignore).toContain("cli.bundle.mjs");
+  });
+});
+
+// ── CLI Hook Path Tests ───────────────────────────────────────────────
+
+describe("CLI Hook Path Tests", () => {
+  test("toUnixPath: converts backslashes to forward slashes", () => {
+    const input = "C:\\Users\\xxx\\AppData\\Local\\npm-cache\\_npx\\hooks\\pretooluse.mjs";
+    const result = toUnixPath(input);
+    assert.ok(
+      !result.includes("\\"),
+      `Expected no backslashes, got: ${result}`,
+    );
+    assert.equal(
+      result,
+      "C:/Users/xxx/AppData/Local/npm-cache/_npx/hooks/pretooluse.mjs",
+    );
+  });
+
+  test("toUnixPath: leaves forward-slash paths unchanged", () => {
+    const input = "/home/user/.claude/plugins/context-mode/hooks/pretooluse.mjs";
+    const result = toUnixPath(input);
+    assert.equal(result, input);
+  });
+
+  test("toUnixPath: handles mixed slashes", () => {
+    const input = "C:/Users\\xxx/AppData\\Local\\hooks/pretooluse.mjs";
+    const result = toUnixPath(input);
+    assert.ok(!result.includes("\\"), `Expected no backslashes, got: ${result}`);
+  });
+
+  test("toUnixPath: hook command string has no backslashes", () => {
+    // Simulate what upgrade() does: "node " + resolve(...)
+    // On Windows, resolve() returns backslashes — toUnixPath must normalize them
+    const windowsPath = "C:\\Users\\xxx\\.claude\\plugins\\cache\\context-mode\\hooks\\pretooluse.mjs";
+    const command = "node " + toUnixPath(windowsPath);
+    assert.ok(
+      !command.includes("\\"),
+      `Hook command must not contain backslashes: ${command}`,
+    );
+  });
+
+  test("toUnixPath: sessionstart path has no backslashes", () => {
+    const windowsPath = "C:\\Users\\xxx\\.claude\\plugins\\cache\\context-mode\\hooks\\sessionstart.mjs";
+    const command = "node " + toUnixPath(windowsPath);
+    assert.ok(
+      !command.includes("\\"),
+      `SessionStart command must not contain backslashes: ${command}`,
+    );
+  });
+});
+
+// ── Package exports ───────────────────────────────────────────────────
+
+describe("Package exports", () => {
+  test("default export exposes ContextModePlugin factory", async () => {
+    const mod = await import("../../src/opencode-plugin.js");
+    expect(mod.ContextModePlugin).toBeDefined();
+    expect(typeof mod.ContextModePlugin).toBe("function");
+  });
+
+  test("default export does not leak CLI internals", async () => {
+    const mod = (await import("../../src/opencode-plugin.js")) as any;
+    expect(mod.toUnixPath).toBeUndefined();
+    expect(mod.doctor).toBeUndefined();
+    expect(mod.upgrade).toBeUndefined();
   });
 });

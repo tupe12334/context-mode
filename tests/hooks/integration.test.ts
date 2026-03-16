@@ -1,20 +1,32 @@
 /**
- * Hook Integration Tests -- pretooluse.mjs
+ * Hook Integration Tests
  *
- * Directly invokes the pretooluse.mjs hook script by piping simulated
- * JSON stdin (the same JSON that Claude Code sends) and asserts correct output.
+ * Consolidated from:
+ * - tests/hook-integration.test.ts (pretooluse.mjs hook tests)
+ * - tests/routing-instructions.test.ts (writeRoutingInstructions TDD tests)
  */
 
-import { describe, test, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+  existsSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 
+// ═══════════════════════════════════════════════════════════════════════
+// Hook Integration Tests -- pretooluse.mjs
+// ═══════════════════════════════════════════════════════════════════════
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const HOOK_PATH = join(__dirname, "..", "hooks", "pretooluse.mjs");
+const HOOK_PATH = join(__dirname, "..", "..", "hooks", "pretooluse.mjs");
 
 // Clean guidance throttle markers before each test so guidance fires fresh.
 // Subprocess hooks use process.ppid (= this test's pid) + VITEST_WORKER_ID.
@@ -383,8 +395,8 @@ describe("Security Policy Enforcement", () => {
       { tool_name: "Bash", tool_input: { command: "git status" } },
       secEnv,
     );
-    // git is in allow list → falls through to Stage 2 routing
-    // Stage 2: git is not curl/wget/fetch → additionalContext with BASH_GUIDANCE
+    // git is in allow list -> falls through to Stage 2 routing
+    // Stage 2: git is not curl/wget/fetch -> additionalContext with BASH_GUIDANCE
     assert.equal(result.exitCode, 0);
     const parsed = JSON.parse(result.stdout);
     assert.ok(parsed.hookSpecificOutput.additionalContext, "Allowed Bash command should get additionalContext");
@@ -554,7 +566,7 @@ describe("Plugin Tool Name Format in ROUTING_BLOCK", () => {
 });
 
 describe("Skill Commands", () => {
-  const SKILLS_DIR = join(__dirname, "..", "skills");
+  const SKILLS_DIR = join(__dirname, "..", "..", "skills");
 
   test("ctx-doctor skill directory exists with valid SKILL.md", () => {
     const skillMd = join(SKILLS_DIR, "ctx-doctor", "SKILL.md");
@@ -587,5 +599,224 @@ describe("Skill Commands", () => {
         `Old skill directory skills/${old} must not exist`,
       );
     }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// Routing Instructions Tests -- writeRoutingInstructions()
+// ═══════════════════════════════════════════════════════════════════════
+
+function createTempDir(prefix: string): string {
+  return mkdtempSync(join(tmpdir(), `ctx-test-${prefix}-`));
+}
+
+function createPluginRoot(base: string): string {
+  // Simulate a plugin root with configs/codex/AGENTS.md
+  const pluginRoot = join(base, "plugin");
+  const configDir = join(pluginRoot, "configs", "codex");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(
+    join(configDir, "AGENTS.md"),
+    "# context-mode — MANDATORY routing rules\n\nUse context-mode MCP tools.\n",
+    "utf-8",
+  );
+  return pluginRoot;
+}
+
+describe("Routing instructions — platform capabilities", () => {
+  test("Codex CLI has sessionStart === false (hookless)", async () => {
+    const { getAdapter } = await import("../../src/adapters/detect.js");
+    const adapter = await getAdapter("codex");
+    expect(adapter.capabilities.sessionStart).toBe(false);
+  });
+
+  test("Claude Code has sessionStart === true (has hooks)", async () => {
+    const { getAdapter } = await import("../../src/adapters/detect.js");
+    const adapter = await getAdapter("claude-code");
+    expect(adapter.capabilities.sessionStart).toBe(true);
+  });
+
+  test("Gemini CLI has sessionStart === true (has hooks)", async () => {
+    const { getAdapter } = await import("../../src/adapters/detect.js");
+    const adapter = await getAdapter("gemini-cli");
+    expect(adapter.capabilities.sessionStart).toBe(true);
+  });
+
+  test("OpenCode has sessionStart === true (has hooks)", async () => {
+    const { getAdapter } = await import("../../src/adapters/detect.js");
+    const adapter = await getAdapter("opencode");
+    expect(adapter.capabilities.sessionStart).toBe(true);
+  });
+
+  test("VS Code Copilot has sessionStart === true (has hooks)", async () => {
+    const { getAdapter } = await import("../../src/adapters/detect.js");
+    const adapter = await getAdapter("vscode-copilot");
+    expect(adapter.capabilities.sessionStart).toBe(true);
+  });
+});
+
+describe("Routing instructions — writeRoutingInstructions()", () => {
+  let tempDir: string;
+  let projectDir: string;
+  let pluginRoot: string;
+
+  beforeEach(() => {
+    tempDir = createTempDir("routing");
+    projectDir = join(tempDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    pluginRoot = createPluginRoot(tempDir);
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  test("creates AGENTS.md when file does not exist", async () => {
+    const { getAdapter } = await import("../../src/adapters/detect.js");
+    const adapter = await getAdapter("codex");
+
+    const result = adapter.writeRoutingInstructions(projectDir, pluginRoot);
+    const targetPath = resolve(projectDir, "AGENTS.md");
+
+    expect(result).toBe(targetPath);
+    expect(existsSync(targetPath)).toBe(true);
+
+    const content = readFileSync(targetPath, "utf-8");
+    expect(content).toContain("context-mode");
+  });
+
+  test("appends to existing AGENTS.md that does not contain context-mode", async () => {
+    const { getAdapter } = await import("../../src/adapters/detect.js");
+    const adapter = await getAdapter("codex");
+
+    // Pre-create AGENTS.md with unrelated content
+    const targetPath = resolve(projectDir, "AGENTS.md");
+    const existingContent = "# My Project Agents\n\nSome existing rules.\n";
+    writeFileSync(targetPath, existingContent, "utf-8");
+
+    const result = adapter.writeRoutingInstructions(projectDir, pluginRoot);
+
+    expect(result).toBe(targetPath);
+
+    const content = readFileSync(targetPath, "utf-8");
+    // Should preserve original content
+    expect(content).toContain("My Project Agents");
+    expect(content).toContain("Some existing rules.");
+    // Should append context-mode instructions
+    expect(content).toContain("context-mode");
+  });
+
+  test("skips when AGENTS.md already contains context-mode (idempotent)", async () => {
+    const { getAdapter } = await import("../../src/adapters/detect.js");
+    const adapter = await getAdapter("codex");
+
+    // Pre-create AGENTS.md WITH context-mode content
+    const targetPath = resolve(projectDir, "AGENTS.md");
+    const existingContent = "# context-mode routing\n\nAlready configured.\n";
+    writeFileSync(targetPath, existingContent, "utf-8");
+
+    const result = adapter.writeRoutingInstructions(projectDir, pluginRoot);
+
+    // Should return null (no-op)
+    expect(result).toBeNull();
+
+    // Content should be unchanged
+    const content = readFileSync(targetPath, "utf-8");
+    expect(content).toBe(existingContent);
+  });
+
+  test("double-write is idempotent", async () => {
+    const { getAdapter } = await import("../../src/adapters/detect.js");
+    const adapter = await getAdapter("codex");
+
+    // First write — creates
+    const result1 = adapter.writeRoutingInstructions(projectDir, pluginRoot);
+    expect(result1).not.toBeNull();
+
+    const contentAfterFirst = readFileSync(resolve(projectDir, "AGENTS.md"), "utf-8");
+
+    // Second write — should be no-op
+    const result2 = adapter.writeRoutingInstructions(projectDir, pluginRoot);
+    expect(result2).toBeNull();
+
+    const contentAfterSecond = readFileSync(resolve(projectDir, "AGENTS.md"), "utf-8");
+    expect(contentAfterSecond).toBe(contentAfterFirst);
+  });
+
+  test("returns null when source config file is missing", async () => {
+    const { getAdapter } = await import("../../src/adapters/detect.js");
+    const adapter = await getAdapter("codex");
+
+    // Use a plugin root WITHOUT configs/codex/AGENTS.md
+    const emptyPluginRoot = join(tempDir, "empty-plugin");
+    mkdirSync(emptyPluginRoot, { recursive: true });
+
+    const result = adapter.writeRoutingInstructions(projectDir, emptyPluginRoot);
+    expect(result).toBeNull();
+    expect(existsSync(resolve(projectDir, "AGENTS.md"))).toBe(false);
+  });
+});
+
+describe("Routing instructions — hookless platform gate", () => {
+  let tempDir: string;
+  let projectDir: string;
+  let pluginRoot: string;
+
+  beforeEach(() => {
+    tempDir = createTempDir("gate");
+    projectDir = join(tempDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    pluginRoot = createPluginRoot(tempDir);
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  test("hookless platform (codex) triggers writeRoutingInstructions", async () => {
+    const { getAdapter } = await import("../../src/adapters/detect.js");
+    const adapter = await getAdapter("codex");
+
+    // Simulate startup gate
+    if (!adapter.capabilities.sessionStart) {
+      adapter.writeRoutingInstructions(projectDir, pluginRoot);
+    }
+
+    expect(existsSync(resolve(projectDir, "AGENTS.md"))).toBe(true);
+  });
+
+  test("hook-capable platform (claude-code) does NOT trigger writeRoutingInstructions", async () => {
+    const { getAdapter } = await import("../../src/adapters/detect.js");
+    const adapter = await getAdapter("claude-code");
+
+    // Simulate startup gate
+    if (!adapter.capabilities.sessionStart) {
+      adapter.writeRoutingInstructions(projectDir, pluginRoot);
+    }
+
+    // AGENTS.md should NOT be created
+    expect(existsSync(resolve(projectDir, "AGENTS.md"))).toBe(false);
+  });
+
+  test("hook-capable platform (gemini-cli) does NOT trigger writeRoutingInstructions", async () => {
+    const { getAdapter } = await import("../../src/adapters/detect.js");
+    const adapter = await getAdapter("gemini-cli");
+
+    if (!adapter.capabilities.sessionStart) {
+      adapter.writeRoutingInstructions(projectDir, pluginRoot);
+    }
+
+    expect(existsSync(resolve(projectDir, "AGENTS.md"))).toBe(false);
+  });
+
+  test("hook-capable platform (opencode) does NOT trigger writeRoutingInstructions", async () => {
+    const { getAdapter } = await import("../../src/adapters/detect.js");
+    const adapter = await getAdapter("opencode");
+
+    if (!adapter.capabilities.sessionStart) {
+      adapter.writeRoutingInstructions(projectDir, pluginRoot);
+    }
+
+    expect(existsSync(resolve(projectDir, "AGENTS.md"))).toBe(false);
   });
 });
